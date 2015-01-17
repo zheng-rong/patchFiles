@@ -1,0 +1,1000 @@
+From 5a062ae4566528410033dbb030efa6bd677e46da Mon Sep 17 00:00:00 2001
+From: Zheng Rong <zheng.rong.14@gmail.com>
+Date: Sat, 17 Jan 2015 17:27:21 -0500
+Subject: [PATCH] First patch: support GPIO trigger
+
+---
+ mv_camera/CMakeLists.txt                           |  12 +-
+ mv_camera/launch/mavlink_only.launch               |  27 +++
+ mv_camera/launch/mv_imu_stereo_bag.launch          |  49 ++++
+ mv_camera/launch/mv_stereo.launch                  |  27 +++
+ mv_camera/launch/stereo_camera.launch              |  45 ++++
+ mv_camera/launch/stereo_camera_mavlink.launch      |  66 +++++
+ .../launch/stereo_camera_mavlink_align.launch      |  81 +++++++
+ mv_camera/manifest.xml                             |   1 +
+ mv_camera/src/modify_camera_settings.cpp           | 155 ++++++++++++
+ mv_camera/src/stereo_time_reporter.cpp             |  35 +++
+ mv_camera/src/time_align_gpio_image.cpp            | 268 +++++++++++++++++++++
+ mv_camera/src/time_align_gpio_image.cpp.old        | 106 ++++++++
+ 12 files changed, 871 insertions(+), 1 deletion(-)
+ create mode 100644 mv_camera/launch/mavlink_only.launch
+ create mode 100644 mv_camera/launch/mv_imu_stereo_bag.launch
+ create mode 100644 mv_camera/launch/mv_stereo.launch
+ create mode 100644 mv_camera/launch/stereo_camera.launch
+ create mode 100644 mv_camera/launch/stereo_camera_mavlink.launch
+ create mode 100644 mv_camera/launch/stereo_camera_mavlink_align.launch
+ create mode 100644 mv_camera/src/modify_camera_settings.cpp
+ create mode 100644 mv_camera/src/stereo_time_reporter.cpp
+ create mode 100644 mv_camera/src/time_align_gpio_image.cpp
+ create mode 100644 mv_camera/src/time_align_gpio_image.cpp.old
+
+diff --git a/mv_camera/CMakeLists.txt b/mv_camera/CMakeLists.txt
+index dc79ad4..4dd4a72 100644
+--- a/mv_camera/CMakeLists.txt
++++ b/mv_camera/CMakeLists.txt
+@@ -1,5 +1,6 @@
+ cmake_minimum_required(VERSION 2.4.6)
+ include($ENV{ROS_ROOT}/core/rosbuild/rosbuild.cmake)
++find_package(OpenCV REQUIRED)
+ 
+ # Set the build type.  Options are:
+ #  Coverage       : w/ debug symbols, w/o optimization, w/ code-coverage
+@@ -26,7 +27,7 @@ add_definitions(-DGENICAM_CACHE_V2_3='"${PROJECT_SOURCE_DIR}/genicam_cache"')
+ 
+ 
+ # common source files for both node and nodelet driver interfaces
+-set(DRIVER_SOURCES 
++set(DRIVER_SOURCES
+   src/driver_mv_camera.cpp
+   src/dev_mv_camera.cpp
+   src/features.cpp
+@@ -41,6 +42,15 @@ rosbuild_add_library(mv_camera_driver ${DRIVER_SOURCES})
+ rosbuild_add_executable(mv_camera_node src/mv_camera_node.cpp )
+ target_link_libraries(mv_camera_node  mv_camera_driver)
+ 
++rosbuild_add_executable(modify_camera_settings src/modify_camera_settings.cpp )
++target_link_libraries(mv_camera_node  mv_camera_driver)
++
++rosbuild_add_executable(stereo_time_reporter src/stereo_time_reporter.cpp)
++target_link_libraries(mv_camera_node mv_camera_driver)
++
++rosbuild_add_executable(time_align_gpio_image src/time_align_gpio_image.cpp)
++target_link_libraries(mv_camera_node mv_camera_driver)
++
+ rosbuild_add_library(mv_camera_nodelet src/mv_camera_nodelet.cpp)
+ target_link_libraries(mv_camera_nodelet mv_camera_driver)
+ 
+diff --git a/mv_camera/launch/mavlink_only.launch b/mv_camera/launch/mavlink_only.launch
+new file mode 100644
+index 0000000..22285cf
+--- /dev/null
++++ b/mv_camera/launch/mavlink_only.launch
+@@ -0,0 +1,27 @@
++<launch>
++
++    <!-- cmu-mavlink talk with px4 -->
++
++    <node   pkg="cmu_mavlink"
++            name="mavlink"
++            type="cmu_mavlink"
++            output="screen">
++    <param name="serial/port" value="/dev/ttyUSB0"/>
++    <param name="serial/baud" value="230400"/>
++    <param name="frame_id/fixed" value="world"/>
++    <param name="frame_id/imu" value="/imu"/>
++    <param name="cmd_timeout_dt" value="0.2"/>
++    <param name="rate/cmd" value="100.0"/>
++    <remap from="~att" to="/imu"/>
++    <remap from="~pd_cmd" to="/pd_cmd"/>
++    <remap from="~voltage" to="/voltage"/>
++    <remap from="~rc_scaled" to="/rc_scaled"/>
++    </node>
++
++
++
++
++
++
++
++</launch> 
+diff --git a/mv_camera/launch/mv_imu_stereo_bag.launch b/mv_camera/launch/mv_imu_stereo_bag.launch
+new file mode 100644
+index 0000000..361d187
+--- /dev/null
++++ b/mv_camera/launch/mv_imu_stereo_bag.launch
+@@ -0,0 +1,49 @@
++<launch>
++
++  <arg name="bagfile" default="cam_data"/>
++
++  <group ns="stereo">
++
++  <!-- left camera -->
++
++    <node pkg="mv_camera" type="mv_camera_node" name="left_camera_node" output="screen">
++      <param name="guid" value="MV_CAMERA_25000828" />
++      <param name="frame_rate" value="20" />
++      <param name="use_ros_time" value="true" />
++      <remap from="camera" to="left" />
++    </node>
++
++  <!-- right camera -->
++
++    <node pkg="mv_camera" type="mv_camera_node" name="right_camera_node" output="screen">
++      <param name="guid" value="MV_CAMERA_25000789" />
++      <param name="frame_rate" value="20" />
++      <param name="use_ros_time" value="true" />
++      <remap from="camera" to="right" />
++    </node>
++
++  </group>
++
++ <node pkg="cmu_mavlink"
++    name="mavlink"
++    type="cmu_mavlink"
++    output="screen">
++    <param name="serial/port" value="/dev/ttyUSB3"/>
++    <param name="serial/baud" value="230400"/>
++    <param name="frame_id/fixed" value="world"/>
++    <param name="frame_id/imu" value="imu"/>
++  </node>
++
++  <node name="cam_configurer" pkg="mv_camera" type="modify_camera_settings" output="screen"/>
++
++  <!--node pkg="rosbag"
++        type="record"
++        name="record"
++        output="screen"
++        args="-O $(find mv_camera)/data/$(arg bagfile)
++          /stereo/left/image_rect
++          /stereo/right/image_rect
++          /mavlink/imu"
++          /-->
++
++</launch>
+diff --git a/mv_camera/launch/mv_stereo.launch b/mv_camera/launch/mv_stereo.launch
+new file mode 100644
+index 0000000..54a9846
+--- /dev/null
++++ b/mv_camera/launch/mv_stereo.launch
+@@ -0,0 +1,27 @@
++<launch>
++
++    <group ns="stereo">
++
++    <!-- left camera -->
++
++        <node pkg="mv_camera" type="mv_camera_node" name="left_camera_node" output="screen">
++            <param name="guid" value="MV_CAMERA_25000844" />
++            <!--param name="frame_rate" value="20" /-->
++            <param name="use_ros_time" value="true" />
++            <remap from="camera" to="left" />
++        </node>
++
++    <!-- right camera -->
++
++        <node pkg="mv_camera" type="mv_camera_node" name="right_camera_node" output="screen">
++            <param name="guid" value="MV_CAMERA_25000833" />
++            <!--param name="frame_rate" value="20" /-->
++            <param name="use_ros_time" value="true" />
++            <remap from="camera" to="right" />
++        </node>
++
++    </group>
++
++    <node name="cam_configurer" pkg="mv_camera" type="modify_camera_settings" output="screen"/>
++
++</launch>
+diff --git a/mv_camera/launch/stereo_camera.launch b/mv_camera/launch/stereo_camera.launch
+new file mode 100644
+index 0000000..16e0eac
+--- /dev/null
++++ b/mv_camera/launch/stereo_camera.launch
+@@ -0,0 +1,45 @@
++<launch>
++
++    <arg name="vehicle" default="mavlink"/>
++
++    <group ns="stereo">
++
++        <!-- left camera -->
++
++        <node
++                pkg="mv_camera" 
++                type="mv_camera_node" 
++                name="left_camera_node" 
++                output="screen">
++        <param name="guid" value="MV_CAMERA_25000813" />
++        <param name="frame_rate" value="20" />
++        <param name="use_ros_time" value="true" />
++        <remap from="camera" to="left" />
++        </node>
++
++        <!-- right camera -->
++
++        <node   
++                pkg="mv_camera" 
++                type="mv_camera_node" 
++                name="right_camera_node" 
++                output="screen">
++        <param name="guid" value="MV_CAMERA_25000815" />
++        <param name="frame_rate" value="20" />
++        <param name="use_ros_time" value="true" />
++        <remap from="camera" to="right" />
++        </node>
++
++    </group>
++
++    <!-- configure the cameras -->
++
++    <node   
++            pkg="mv_camera" 
++            name="cam_configurer"
++            type="modify_camera_settings" 
++            output="screen"/>
++
++
++
++</launch> 
+diff --git a/mv_camera/launch/stereo_camera_mavlink.launch b/mv_camera/launch/stereo_camera_mavlink.launch
+new file mode 100644
+index 0000000..96fff6d
+--- /dev/null
++++ b/mv_camera/launch/stereo_camera_mavlink.launch
+@@ -0,0 +1,66 @@
++<launch>
++
++    <arg name="vehicle" default="mavlink"/>
++
++    <group ns="stereo">
++
++        <!-- left camera -->
++
++        <node
++                pkg="mv_camera" 
++                type="mv_camera_node" 
++                name="left_camera_node" 
++                output="screen">
++        <param name="guid" value="MV_CAMERA_25000844" />
++        <param name="frame_rate" value="20" />
++        <param name="use_ros_time" value="true" />
++        <remap from="camera" to="left" />
++        </node>
++
++        <!-- right camera -->
++
++        <node   
++                pkg="mv_camera" 
++                type="mv_camera_node" 
++                name="right_camera_node" 
++                output="screen">
++        <param name="guid" value="MV_CAMERA_25000833" />
++        <param name="frame_rate" value="20" />
++        <param name="use_ros_time" value="true" />
++        <remap from="camera" to="right" />
++        </node>
++
++    </group>
++
++    <!-- configure the cameras -->
++
++    <node   
++            pkg="mv_camera" 
++            name="cam_configurer"
++            type="modify_camera_settings" 
++            output="screen"/>
++
++
++
++
++    <!-- cmu-mavlink talk with px4 -->
++
++    <node   pkg="cmu_mavlink"
++            name="mavlink"
++            type="cmu_mavlink"
++            output="screen">
++    <param name="serial/port" value="/dev/ttyUSB0"/>
++    <param name="serial/baud" value="230400"/>
++    <param name="frame_id/fixed" value="world"/>
++    <param name="frame_id/imu" value="/imu"/>
++    <param name="cmd_timeout_dt" value="0.2"/>
++    <param name="rate/cmd" value="100.0"/>
++    <remap from="~att" to="/$(arg vehicle)/imu"/>
++    <remap from="~pd_cmd" to="/$(arg vehicle)/pd_cmd"/>
++    <remap from="~voltage" to="/$(arg vehicle)/voltage"/>
++    <remap from="~rc_scaled" to="/$(arg vehicle)/rc_scaled"/>
++    </node>
++
++
++
++</launch> 
+diff --git a/mv_camera/launch/stereo_camera_mavlink_align.launch b/mv_camera/launch/stereo_camera_mavlink_align.launch
+new file mode 100644
+index 0000000..79518f9
+--- /dev/null
++++ b/mv_camera/launch/stereo_camera_mavlink_align.launch
+@@ -0,0 +1,81 @@
++<launch>
++
++<arg name="vehicle" default="mini"/>
++    
++<group ns="$(arg vehicle)">
++
++    <group ns="stereo">
++
++        <!-- left camera -->
++
++        <node
++                pkg="mv_camera" 
++                type="mv_camera_node" 
++                name="left_camera_node" 
++                output="screen">
++        <param name="guid" value="MV_CAMERA_25000815" />
++        <param name="frame_rate" value="4" />
++        <param name="use_ros_time" value="true" />
++        <remap from="camera" to="left" />
++        </node>
++
++        <!-- right camera -->
++
++        <node   
++                pkg="mv_camera" 
++                type="mv_camera_node" 
++                name="right_camera_node" 
++                output="screen">
++        <param name="guid" value="MV_CAMERA_25000813" />
++        <param name="frame_rate" value="4" />
++        <param name="use_ros_time" value="true" />
++        <remap from="camera" to="right" />
++        </node>
++
++    </group>
++
++    <!-- configure the cameras -->
++
++    <node   
++            pkg="mv_camera" 
++            name="cam_configurer"
++            type="modify_camera_settings" 
++            output="screen"/>
++
++    
++    <!-- time_alignment -->
++
++    <node
++            pkg="mv_camera"
++            name="time_alignment"
++            type="time_align_gpio_image"
++            output="screen"/>
++
++
++</group>
++
++
++    <!-- cmu-mavlink talk with px4 -->
++
++    <node   pkg="cmu_mavlink"
++            name="mavlink"
++            type="cmu_mavlink"
++            output="screen">
++    <param name="serial/port" value="/dev/ttyUSB0"/>
++    <param name="serial/baud" value="230400"/>
++    <param name="frame_id/fixed" value="world"/>
++    <param name="frame_id/imu" value="/imu"/>
++    <param name="cmd_timeout_dt" value="0.2"/>
++    <param name="rate/cmd" value="100.0"/>
++    <remap from="~att" to="/$(arg vehicle)/imu"/>
++    <remap from="~pd_cmd" to="/$(arg vehicle)/pd_cmd"/>
++    <remap from="~voltage" to="/$(arg vehicle)/voltage"/>
++    <remap from="~rc_scaled" to="/$(arg vehicle)/rc_scaled"/>
++    </node>
++
++   
++
++
++
++
++</launch> 
+diff --git a/mv_camera/manifest.xml b/mv_camera/manifest.xml
+index d0c6322..f99605c 100644
+--- a/mv_camera/manifest.xml
++++ b/mv_camera/manifest.xml
+@@ -13,6 +13,7 @@
+   <depend package="driver_base"/>
+   <depend package="dynamic_reconfigure"/>
+   <depend package="image_transport"/>
++  <depend package="cv_bridge"/>
+   <depend package="nodelet"/>
+   <depend package="tf"/>
+   <depend package="mv_driver"/>
+diff --git a/mv_camera/src/modify_camera_settings.cpp b/mv_camera/src/modify_camera_settings.cpp
+new file mode 100644
+index 0000000..a7acca4
+--- /dev/null
++++ b/mv_camera/src/modify_camera_settings.cpp
+@@ -0,0 +1,155 @@
++#include <iostream>
++#include <ros/ros.h>
++#include <string>
++#include <mvIMPACT_CPP/mvIMPACT_acquire.h>
++#include <mv_camera/PropertyMap.h>
++
++
++using namespace std;
++
++
++bool callService(ros::ServiceClient& client, string& identifier, string& value)
++{
++    mv_camera::PropertyMap srv;
++
++    // Fill in the request
++    srv.request.command = mv_camera::PropertyMap::Request::SET_PROPERTY;
++    srv.request.identifier = identifier;
++    srv.request.value = value;
++
++    // Call the service
++    if (client.call(srv))
++    {
++        ROS_INFO("Status: %d", srv.response.status);
++        ROS_INFO("Result: %s", srv.response.result.c_str());
++        return true;
++    }
++    else
++    {
++        ROS_ERROR("Failed to call the service \"poll_property_list\"!");
++        return false;
++    }
++}
++
++bool queryService(ros::ServiceClient& client, string& identifier, string& value)
++{
++    mv_camera::PropertyMap srv;
++
++    // Fill in the request
++    srv.request.command = mv_camera::PropertyMap::Request::GET_PROPERTY_INFO;
++    srv.request.identifier = identifier;
++    srv.request.value = value;
++
++    // Call the service
++    if (client.call(srv))
++    {
++        ROS_INFO("Status: %d", srv.response.status);
++        ROS_INFO("Result: %s", srv.response.result.c_str());
++        return true;
++    }
++    else
++    {
++        ROS_ERROR("Failed to call the service \"poll_property_list\"!");
++        return false;
++    }
++}
++
++int main(int argc, char **argv)
++{
++
++    // Initialize the client
++    ros::init(argc, argv, "modify_property_list");
++    ros::NodeHandle n;
++
++    std::string ns = n.getNamespace();
++    std::string left_cam_service  = ros::names::append(ns, "stereo/left/poll_property_list");
++    std::string right_cam_service = ros::names::append(ns, "stereo/right/poll_property_list");
++
++    ros::service::waitForService(left_cam_service);
++    ros::service::waitForService(right_cam_service);
++
++    ros::ServiceClient client_left = n.serviceClient<mv_camera::PropertyMap>(left_cam_service);
++    ros::ServiceClient client_right = n.serviceClient<mv_camera::PropertyMap>(right_cam_service);
++
++    string identifier;
++    string value;
++
++    /**********************************************************************
++     *                           Modify Settings
++     * *******************************************************************/
++    // Set the Binning mode to reduce the image to one quarter
++    identifier = "Camera/BinningMode";
++    value = "BinningHV";
++    callService(client_left, identifier, value);
++    callService(client_right, identifier, value);
++
++    // Enable Autoexposure
++    identifier = "Camera/AutoExposeControl";
++    value = "On";
++    callService(client_left, identifier, value);
++    callService(client_right, identifier, value);
++
++    // Enable Autogain
++    identifier = "Camera/AutoGainControl";
++    value = "On";
++    callService(client_left, identifier, value);
++    callService(client_right, identifier, value);
++
++    // Set the region used to adjust the exposure and gain
++    identifier = "Camera/AutocontrolParameters/AoiMode";
++    value = "Full";
++    callService(client_left, identifier, value);
++    callService(client_right, identifier, value);
++
++    // Set the auto-control mode
++    identifier = "Camera/AutoControlMode";
++    value = "DeviceSpecific";
++    callService(client_left, identifier, value);
++    callService(client_right, identifier, value);
++
++    // Set the auto-control speed
++    identifier = "Camera/AutoControlParameters/ControllerSpeed";
++    value = "Fast";
++    callService(client_left, identifier, value);
++    callService(client_right, identifier, value);
++
++    // Disable the HDR mode
++    identifier = "Camera/HDRControl/HDREnable";
++    value = "Off";
++    callService(client_left, identifier, value);
++    callService(client_right, identifier, value);
++
++
++/*
++    // Set the left camera to master mode
++    identifier = "Camera/FlashMode";
++    value = "Digout0";
++    callService(client_left, identifier, value);
++
++    identifier = "Camera/FlashType";
++    value = "Standard";
++    callService(client_left, identifier, value);
++*/
++
++    // Set the right camera to slave mode
++    identifier = "Camera/TriggerMode";
++    value = "OnHighLevel";
++    queryService(client_left, identifier, value);
++    callService(client_left, identifier, value);
++
++    queryService(client_right, identifier, value);
++    callService(client_right, identifier, value);
++
++    identifier = "Camera/TriggerSource";
++    value = "DigIn0";
++    callService(client_right, identifier, value);
++    
++    callService(client_left, identifier, value);
++
++
++    return 0;
++
++}
++
++
++
+diff --git a/mv_camera/src/stereo_time_reporter.cpp b/mv_camera/src/stereo_time_reporter.cpp
+new file mode 100644
+index 0000000..0ecacff
+--- /dev/null
++++ b/mv_camera/src/stereo_time_reporter.cpp
+@@ -0,0 +1,35 @@
++
++#include <iostream>
++#include <ros/ros.h>
++#include <image_transport/image_transport.h>
++
++
++void imageLeftCallback(const sensor_msgs::ImageConstPtr& msg)
++{
++    ROS_INFO("Left Image Time:  %f", msg->header.stamp.toSec());
++    //std::cout << "Left Image Time: " << msg->header.stamp.toSec() << std::endl;
++    return;
++}
++
++void imageRightCallback(const sensor_msgs::ImageConstPtr& msg)
++{
++    ROS_INFO("Right Image Time: %f", msg->header.stamp.toSec());
++    //std::cout << "Right Image Time: " << msg->header.stamp.toSec() << std::endl;
++    return;
++}
++
++int main(int argc, char **argv)
++{
++
++    ros::init(argc, argv, "image_time_reporter");
++    ros::NodeHandle nh;
++
++    image_transport::ImageTransport it(nh);
++    image_transport::Subscriber sub_left  = it.subscribe("/stereo/left/image_raw",  1, imageLeftCallback);
++    image_transport::Subscriber sub_right = it.subscribe("/stereo/right/image_raw", 1, imageRightCallback);
++
++
++    ros::spin();
++
++    return 0;
++}
+diff --git a/mv_camera/src/time_align_gpio_image.cpp b/mv_camera/src/time_align_gpio_image.cpp
+new file mode 100644
+index 0000000..21c1122
+--- /dev/null
++++ b/mv_camera/src/time_align_gpio_image.cpp
+@@ -0,0 +1,268 @@
++#include <iostream>
++#include <ros/ros.h>
++#include <image_transport/image_transport.h>
++#include <quadrotor_msgs/GPIOTime.h>
++#include <sensor_msgs/CameraInfo.h>
++#include <opencv2/opencv.hpp>
++#include <cv_bridge/cv_bridge.h>
++
++
++using namespace std;
++
++#define FRAME_TIME_TOLERANCE 3.0e-2     //25ms
++
++/*
++bool left_image_ready = false;
++bool right_image_ready = false;
++bool gpio_time_ready = false;
++
++// temp buff used to store the msg
++sensor_msgs::Image left_image_msg;
++sensor_msgs::Image right_image_msg;
++quadrotor_msgs::GPIOTime gpio_time_msg;
++
++// previous corresponding msgs: left, right, gpio
++sensor_msgs::Image          prev_left_image;
++sensor_msgs::Image          prev_right_image;
++quadrotor_msgs::GPIOTime    prev_gpio_time;
++
++//current corresponding msgs: left, right, gpio
++sensor_msgs::Image          curr_left_image;
++sensor_msgs::Image          Curr_right_image;
++quadrotor_msgs::GPIOTime    curr_gpio_time;
++
++ros::Time prev_approx_time;
++ros::Time curr_approx_time;
++
++unsigned int prev_msgs_num = 0;
++
++bool prev_left_ready = false;
++bool prev_right_ready = false;
++bool prev_gpio_ready = false;
++
++unsigned int updated_image_num = 0;
++
++*/
++
++bool align_msgs_ready = false;
++
++// buffer used to store the msgs
++std::vector<sensor_msgs::CameraInfo> left_info_buff(0);
++std::vector<sensor_msgs::CameraInfo> right_info_buff(0);
++std::vector<sensor_msgs::Image> left_image_buff(0);
++std::vector<sensor_msgs::Image> right_image_buff(0);
++std::vector<quadrotor_msgs::GPIOTime> time_buff(0);
++
++std::vector<sensor_msgs::CameraInfo>::iterator left_info_iter;
++std::vector<sensor_msgs::CameraInfo>::iterator right_info_iter;
++std::vector<sensor_msgs::Image>::iterator left_image_iter;
++std::vector<sensor_msgs::Image>::iterator right_image_iter;
++std::vector<quadrotor_msgs::GPIOTime>::iterator time_iter;
++
++std::vector<double> compare_vector(5);
++std::vector<double>::iterator compare_iter;
++std::vector<double>::iterator max_iter;
++std::vector<double>::iterator min_iter;
++
++double time_error = 0;
++
++void gpio_time_callback(const quadrotor_msgs::GPIOTime::ConstPtr& time)
++{
++    // find out the valid gpio-time message with corresponding ref1&ref2 time
++    // the time error should be close to 0ms or 50ms in the case of 20Hz frame rate 
++    // the threshould is set to 1ms
++    // useful  message: error < 1ms
++    // useless message: 49ms < error < 51ms
++    // odd message: 1ms < error < 49ms or error > 51ms, should NOT happen! 
++    // invalid gpio_time message
++    time_error = fabs(time->ref1.stamp.toSec() - time->ref2.stamp.toSec());
++    if (time_error > 0.1e-2)
++    {
++	    if((time_error < 4.9e-2)||(time_error > 5.3e-2))
++        {
++            ROS_INFO("Odd GPIO-time message: left - right = %f", time_error);
++        }
++        
++        return;
++    }
++    // valid gpio_time message
++    else
++    {
++        time_buff.push_back(*time);
++
++    }
++}
++
++void left_image_callback(const sensor_msgs::ImageConstPtr& image)
++{
++    cv_bridge::CvImagePtr img_temp = cv_bridge::toCvCopy(image);
++    cv::flip(img_temp->image, img_temp->image, -1);
++    left_image_buff.push_back(*(img_temp->toImageMsg()));
++}
++
++void right_image_callback(const sensor_msgs::ImageConstPtr& image)
++{
++    cv_bridge::CvImagePtr img_temp = cv_bridge::toCvCopy(image);
++    cv::flip(img_temp->image, img_temp->image, -1);
++    right_image_buff.push_back(*(img_temp->toImageMsg()));
++}
++
++void left_info_callback(const sensor_msgs::CameraInfoConstPtr& info)
++{
++    left_info_buff.push_back(*info);
++}
++
++void right_info_callback(const sensor_msgs::CameraInfoConstPtr& info)
++{
++    right_info_buff.push_back(*info);
++}
++
++int main(int argc, char **argv)
++{
++    ros::init(argc, argv, "time_align_gpio_image");
++    ros::NodeHandle nh;
++
++    std::string ns = nh.getNamespace();
++
++    std::string sub_time_topic_name =  "/mavlink/gpio_time";
++    std::string sub_left_image_topic_name = ros::names::append(ns, "stereo/left/image_raw");
++    std::string sub_right_image_topic_name = ros::names::append(ns, "stereo/right/image_raw");
++    std::string sub_left_info_topic_name = ros::names::append(ns, "stereo/left/camera_info");
++    std::string sub_right_info_topic_name = ros::names::append(ns, "stereo/right/camera_info");
++
++    std::string pub_time_topic_name = ros::names::append(ns, "align/gpio_time");
++    std::string pub_left_image_topic_name = ros::names::append(ns, "align/stereo/left/image_raw");
++    std::string pub_right_image_topic_name = ros::names::append(ns, "align/stereo/right/image_raw");
++    std::string pub_left_info_topic_name = ros::names::append(ns, "align/stereo/left/camera_info");
++    std::string pub_right_info_topic_name = ros::names::append(ns, "align/stereo/right/camera_info");
++
++    image_transport::ImageTransport it(nh);
++    
++    
++    image_transport::Subscriber sub_left_image = it.subscribe(sub_left_image_topic_name, 1, left_image_callback);
++    image_transport::Subscriber sub_right_image = it.subscribe(sub_right_image_topic_name, 1, right_image_callback);
++    
++    ros::Subscriber sub_time = nh.subscribe(sub_time_topic_name, 1, gpio_time_callback);
++    ros::Subscriber sub_left_info = nh.subscribe(sub_left_info_topic_name, 1, left_info_callback);
++    ros::Subscriber sub_right_info = nh.subscribe(sub_right_info_topic_name, 1, right_info_callback);
++
++
++
++    ros::Publisher pub_time = nh. advertise<quadrotor_msgs::GPIOTime>(pub_time_topic_name, 5);
++    
++    //image_transport::Publisher pub_left_image = it.advertise(pub_left_image_topic_name, 1);
++    //image_transport::Publisher pub_right_image = it.advertise(pub_right_image_topic_name, 1);
++    ros::Publisher pub_left_image = nh.advertise<sensor_msgs::Image>(pub_left_image_topic_name, 5);
++    ros::Publisher pub_right_image = nh.advertise<sensor_msgs::Image>(pub_right_image_topic_name, 5);
++    ros::Publisher pub_left_info = nh.advertise<sensor_msgs::CameraInfo>(pub_left_info_topic_name, 5);
++    ros::Publisher pub_right_info = nh.advertise<sensor_msgs::CameraInfo>(pub_right_info_topic_name, 5);
++
++    ros::Rate rate(100); //40Hz
++
++    while(ros::ok())
++    {
++
++        while(  (left_image_buff.size() > 0) && 
++                (right_image_buff.size() > 0) && 
++                (time_buff.size() > 0) && 
++                (left_info_buff.size() > 0) && 
++                (right_info_buff.size() > 0))
++        {
++            compare_vector.at(0) = time_buff[0].header.stamp.toSec();
++            compare_vector.at(1) = left_image_buff[0].header.stamp.toSec();
++            compare_vector.at(2) = right_image_buff[0].header.stamp.toSec();
++            compare_vector.at(3) = left_info_buff[0].header.stamp.toSec();
++            compare_vector.at(4) = right_info_buff[0].header.stamp.toSec();
++
++            compare_iter = compare_vector.begin();
++
++            max_iter = max_element(compare_iter, compare_iter+5);
++            min_iter = min_element(compare_iter, compare_iter+5);
++
++            // three time stamps match
++            if(*max_iter - *min_iter < FRAME_TIME_TOLERANCE)
++            {
++                //change time of image and info
++                left_image_buff.at(0).header.stamp = time_buff.at(0).ref1.stamp;
++                right_image_buff.at(0).header.stamp = time_buff.at(0).ref2.stamp;
++                left_info_buff.at(0).header.stamp = time_buff.at(0).ref1.stamp;
++                right_info_buff.at(0).header.stamp = time_buff.at(0).ref2.stamp;
++
++                // publish the msgs
++                pub_time.publish(time_buff.at(0));
++                pub_left_image.publish(left_image_buff.at(0));
++                pub_right_image.publish(right_image_buff.at(0));
++                pub_left_info.publish(left_info_buff.at(0));
++                pub_right_info.publish(right_info_buff.at(0));
++
++                // erase the published msgs from the vector
++                time_buff.erase(time_buff.begin());
++                left_image_buff.erase(left_image_buff.begin());
++                right_image_buff.erase(right_image_buff.begin());
++                left_info_buff.erase(left_info_buff.begin());
++                right_info_buff.erase(right_info_buff.begin());
++            }
++            // there are at least one stamp-time that is too old which may be caused by frame/message lost
++            // then delete the oldest message
++            else
++            {
++                if(min_iter == compare_iter)
++                {
++                    time_buff.erase(time_buff.begin());
++                    ROS_WARN("GPIO-Time message is too old!");
++                }
++                else if(min_iter == compare_iter+1)
++                {
++                    left_image_buff.erase(left_image_buff.begin());
++                    ROS_WARN("Left-image message is too old!");
++                }
++                else if(min_iter == compare_iter+2)
++                {
++                    right_image_buff.erase(right_image_buff.begin());
++                    ROS_WARN("Right-image message is too old!");
++                }
++                else if(min_iter == compare_iter+3)
++                {
++                    left_info_buff.erase(left_info_buff.begin());
++                    ROS_WARN("Left-info message is too old!");
++                }
++                else if(min_iter == compare_iter+4)
++                {
++                    right_info_buff.erase(right_info_buff.begin());
++                    ROS_WARN("Right-info message is too old!");
++                }
++
++                //ROS_WARN("Messages of Stereo-Image or GPIO-Time may be lost!");
++            }
++
++        }
++
++
++        ros::spinOnce();
++        rate.sleep();
++    }
++
++    return 0;
++}
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
+diff --git a/mv_camera/src/time_align_gpio_image.cpp.old b/mv_camera/src/time_align_gpio_image.cpp.old
+new file mode 100644
+index 0000000..df6da19
+--- /dev/null
++++ b/mv_camera/src/time_align_gpio_image.cpp.old
+@@ -0,0 +1,106 @@
++#include <iostream>
++#include <ros/ros.h>
++#include <image_transport/image_transport.h>
++
++using namespace std;
++
++bool left_image_ready = false;
++bool right_image_ready = false;
++bool gpio_time_ready = false;
++
++// temp buff used to store the msg
++sensor_msgs::Image left_image_msg;
++sensor_msgs::Image right_image_msg;
++quadrotor_msgs::GPIOTime gpio_time_msg;
++
++vector<sensor_msgs/Image> left_image_buff(0);
++vector<sensor_msgs/Image> right_image_buff(0);
++vector<quadrotor_msgs/GPIOTime> gpio_time_buff(0);
++
++unsigned int updated_image_num = 0;
++
++void gpio_time_callback(const quadrotor_msgs::GPIOTime::ConstPtr& time)
++{
++    // find out the valid gpio-time message with corresponding ref1&ref2 time
++    // the threshould is set to 1ms
++    if(fabs(time->ref1.stamp.toSec() - time->ref2.stamp.toSec())<1e-3)    
++    {
++        gpio_time_ready = true;
++        gpio_time_msg = *time;
++
++        if(left_image_ready)
++        {
++            //check the ROS time of gpio-time-msg and image-msg, difference should be very small
++            //the threshould is set to 25ms, so the max frame rate can be 40Hz
++            if(fabs(gpio_time_msg.header.stamp.toSec() - left_image_msg.header.stamp.toSec())<2.5e-2)
++            {
++                // then the time stamps of image can be changed to gpio-time
++                left_image_msg.header.stamp = gpio_time_msg.ref1.stamp;
++                // publish left image msg
++                // TBD
++                updated_image_num++;
++            }
++            else
++            {
++
++            }
++        }
++        
++        if(right_image_ready)
++        {
++            if(fabs(gpio_time_msg.header.stamp.toSec() - right_image_msg.header.stamp.toSec())<2.5e-2) 
++            {
++                right_image_msg.header.stamp = gpio_time_msg.ref2.stamp;                                               
++                //publish
++                //TBD
++                updated_image_num++;
++                
++            }
++            else
++            {
++
++            }
++  
++        }
++        
++        if(updated_image_num == 2)
++        {
++            gpio_time_ready = false;
++            updated_image_num = 0;
++        }
++    }
++}
++
++void left_image_callback(const sensor_msgs::ImageConstPtr& image)
++{
++    left_image_msg = *image;
++    left_image_ready = true;
++    
++    if(gpio_time_ready)
++    {
++        
++    }
++}
++
++void right_image_callback(const sensor_msgs::ImageConstPtr& image)
++{
++
++}
++
++
++
++int main(int argc, char **argv)
++{
++    ros::init(argc, argv, "time_align_gpio_image");
++    ros::NodeHandle nh;
++
++    image_transport::ImageTransport it(nh);
++    image_transport::Subscriber sub_left = it.subscribe("/stereo/left/image_raw", 1, left_image_callback);
++    image_transport::Subscriber sub_right = it.subscribe("/stereo/right/image_raw", 1, right_image_callback);
++
++    ros::Subscriber sub_time = nh.subscribe("/mavlink/gpio_time", 1, gpio_time_callback);
++
++    ros::spin();
++
++    return 0;
++}
+-- 
+1.9.1
+
